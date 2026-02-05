@@ -32,6 +32,13 @@ const registerAdmin = asyncHandler(async (req, res) => {
         throw new Error('Please enter all fields');
     }
 
+    const adminCount = await Admin.countDocuments();
+    
+    if (adminCount > 0) {
+        res.status(400);
+        throw new Error('Admin account already exists. Only one admin is allowed.');
+    }
+
     const adminExists = await Admin.findOne({ email });
 
     if (adminExists) {
@@ -128,7 +135,6 @@ const getAllMessages = asyncHandler(async (req, res) => {
 
 const getAdminGroups = asyncHandler(async (req, res) => {
     try {
-        // Get groups where admin is the group admin
         const adminCreatedGroups = await Chat.find({
             isGroupChat: true,
             groupAdmin: req.admin._id
@@ -147,7 +153,6 @@ const getAdminGroups = asyncHandler(async (req, res) => {
 
 const getGroupsAdminIsIn = asyncHandler(async (req, res) => {
     try {
-        // Get groups where admin is a member (but not necessarily admin)
         const groupsAdminIsIn = await Chat.find({
             isGroupChat: true,
             users: { $elemMatch: { $eq: req.admin._id } }
