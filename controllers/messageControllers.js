@@ -4,12 +4,11 @@ const User = require('../models/userModel')
 const Chat = require('../models/chatModel')
 
 const sendMessage = asyncHandler(async(req,res) => {
-    const {content, chatId, fileUrl, fileName, fileType} = req.body;
+    const {content, chatId, fileUrl, fileName, fileType, replyTo} = req.body;
 
     if((!content && !fileUrl) || !chatId){
         console.log('Invalid data passed into request');
         return res.sendStatus(400);
-        
     }
 
     const chat = await Chat.findById(chatId);
@@ -37,7 +36,7 @@ const sendMessage = asyncHandler(async(req,res) => {
         sender: req.user._id,
         content: content || '',
         chat: chatId,
-        isRead: false
+        readBy: [req.user._id] 
     };
     
     if (fileUrl) {
@@ -46,10 +45,15 @@ const sendMessage = asyncHandler(async(req,res) => {
         newMessage.fileType = fileType;
     }
 
+    if (replyTo) {
+        newMessage.replyTo = replyTo;
+    }
+
     try {
         var message = await Message.create(newMessage);
         message = await message.populate('sender','name pic');
         message = await message.populate('chat');
+        message = await message.populate('replyTo');
         message = await User.populate(message,{
             path:'chat.users',
             select:'name pic email'
@@ -59,46 +63,39 @@ const sendMessage = asyncHandler(async(req,res) => {
             latestMessage:message
         });
 
+        const io = req.app.get('io');
+        if (io) {
+            chat.users.forEach(user => {
+                if (user._id.toString() !== req.user._id.toString()) {
+                    io.to(user._id.toString()).emit('message recieved', message);
+                }
+            });
+        }
+
         res.json(message);
     } catch (error) {
         res.status(400);
         throw new Error(error.message);
     }
+});
 
-})
-
-    
 const allMessages = asyncHandler(async (req,res) =>{
     try {
-        const isAdmin = req.user.isAdmin;
+        const isAdmin = req.user && req.user.isAdmin;
+        const chatId = req.params.chatId;
         
-        if (isAdmin) {
-            const messages = await Message.find({chat: req.params.chatId})
-                .populate('sender','name pic email')
-                .populate('chat');
-            res.json(messages);
-        } else {
-            const chat = await Chat.findById(req.params.chatId);
-            if (!chat) {
-                res.status(404);
-                throw new Error('Chat not found');
-            }
-            
-            if (!chat.users.some(user => user._id.toString() === req.user._id.toString())) {
-                res.status(403);
-                throw new Error('You are not authorized to access this chat');
-            }
-            
-            const messages = await Message.find({chat: req.params.chatId})
-                .populate('sender','name pic email')
-                .populate('chat');
-            res.json(messages);
-        }
+        const messages = await Message.find({chat: chatId})
+            .populate('sender','name pic email')
+            .populate('chat')
+            .populate('replyTo')
+            .sort({createdAt: 1});
+        
+        res.json(messages);
     } catch (error) {
         res.status(400);
         throw new Error(error.message);
     }
-})
+});
 
 const deleteMessage = asyncHandler(async (req, res) => {
     try {
@@ -109,7 +106,7 @@ const deleteMessage = asyncHandler(async (req, res) => {
             throw new Error('Message not found');
         }
         
-       if (message.sender.toString() !== req.user._id.toString()) {
+        if (message.sender.toString() !== req.user._id.toString()) {
             res.status(401);
             throw new Error('You can only delete your own messages');
         }
@@ -121,7 +118,7 @@ const deleteMessage = asyncHandler(async (req, res) => {
         res.status(400);
         throw new Error(error.message);
     }
-})
+});
 
 const clearNotifications = asyncHandler(async (req, res) => {
     try {
@@ -130,9 +127,10 @@ const clearNotifications = asyncHandler(async (req, res) => {
         await Message.updateMany(
             { 
                 chat: { $in: userChats },
-                isRead: { $ne: true }
+                sender: { $ne: req.user._id }, 
+                readBy: { $ne: req.user._id }  
             },
-            { $set: { isRead: true } }
+            { $addToSet: { readBy: req.user._id } }
         );
         
         res.json({ message: 'All notifications cleared' });
@@ -140,6 +138,101 @@ const clearNotifications = asyncHandler(async (req, res) => {
         res.status(400);
         throw new Error(error.message);
     }
-})
+});
 
-module.exports = {sendMessage, allMessages, deleteMessage, clearNotifications}
+
+const markMessagesAsRead = asyncHandler(async (req, res) => {
+    try {
+        const { chatId } = req.params;
+        const userId = req.user._id;
+
+       
+        const result = await Message.updateMany(
+            { 
+                chat: chatId, 
+                sender: { $ne: userId },
+                readBy: { $ne: userId }
+            },
+            { $addToSet: { readBy: userId } }
+        );
+
+        const unreadCount = await Message.countDocuments({
+            chat: chatId,
+            sender: { $ne: userId },
+            readBy: { $ne: userId }
+        });
+
+        const io = req.app.get('io');
+        if (io) {
+            io.to(userId.toString()).emit('messages read', { 
+                chatId, 
+                unreadCount 
+            });
+        }
+
+        res.json({ 
+            success: true, 
+            modifiedCount: result.modifiedCount,
+            unreadCount 
+        });
+    } catch (error) {
+        res.status(400);
+        throw new Error(error.message);
+    }
+});
+
+const getUnreadCounts = asyncHandler(async (req, res) => {
+    try {
+        const userId = req.user._id;
+
+        const chats = await Chat.find({ users: userId });
+        
+        const unreadCounts = await Promise.all(
+            chats.map(async (chat) => {
+                const count = await Message.countDocuments({
+                    chat: chat._id,
+                    sender: { $ne: userId },
+                    readBy: { $ne: userId }
+                });
+                
+                return {
+                    chatId: chat._id,
+                    unreadCount: count
+                };
+            })
+        );
+
+        res.json(unreadCounts);
+    } catch (error) {
+        res.status(400);
+        throw new Error(error.message);
+    }
+});
+
+const getChatUnreadCount = asyncHandler(async (req, res) => {
+    try {
+        const { chatId } = req.params;
+        const userId = req.user._id;
+
+        const count = await Message.countDocuments({
+            chat: chatId,
+            sender: { $ne: userId },
+            readBy: { $ne: userId }
+        });
+
+        res.json({ unreadCount: count });
+    } catch (error) {
+        res.status(400);
+        throw new Error(error.message);
+    }
+});
+
+module.exports = {
+    sendMessage, 
+    allMessages, 
+    deleteMessage, 
+    clearNotifications,
+    markMessagesAsRead,
+    getUnreadCounts,
+    getChatUnreadCount
+};
