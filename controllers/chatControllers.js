@@ -51,20 +51,35 @@ const accessChat = asyncHandler(async (req,res) =>{
 
 const fetchChat = asyncHandler(async (req,res)=>{
     try {
-        Chat.find({users:{$elemMatch:{$eq: req.user._id}}})
-        .populate("users","-password")
-        .populate("groupAdmin","-password")
-        .populate("latestMessage")
-        .populate("blockedBy")
-        .sort({updatedAt:-1})
-        .then(async (results)=>{
-            results = await User.populate(results,{
-                path:'latestMessage.sender',
-                select:"name pic email"
-            });
+        const chats = await Chat.find({users:{$elemMatch:{$eq: req.user._id}}})
+            .populate("users","-password")
+            .populate("groupAdmin","-password")
+            .populate("latestMessage")
+            .populate("blockedBy")
+            .sort({updatedAt:-1});
+        
+        // Add unread counts to each chat
+        const chatsWithUnread = await Promise.all(
+            chats.map(async (chat) => {
+                const unreadCount = await Message.countDocuments({
+                    chat: chat._id,
+                    sender: { $ne: req.user._id },
+                    readBy: { $ne: req.user._id }
+                });
+                
+                return {
+                    ...chat.toObject(),
+                    unreadCount
+                };
+            })
+        );
 
-        res.status(200).send(results);
-        })
+        const populatedChats = await User.populate(chatsWithUnread, {
+            path: 'latestMessage.sender',
+            select: 'name pic email'
+        });
+
+        res.status(200).send(populatedChats);
     } catch (error) {
         res.status(400);
         throw new Error(error.message);
@@ -237,6 +252,7 @@ const deleteGroup = asyncHandler(async (req, res) => {
         throw new Error("Only group admin can delete the group");
     }
 
+    await Message.deleteMany({ chat: chatId });
     await Chat.findByIdAndDelete(chatId);
     
     res.json({ message: 'Group deleted successfully' });
@@ -250,9 +266,9 @@ const markChatAsRead = asyncHandler(async (req, res) => {
             { 
                 chat: chatId, 
                 sender: { $ne: req.user._id },
-                isRead: { $ne: true }
+                readBy: { $ne: req.user._id }
             },
-            { $set: { isRead: true } }
+            { $addToSet: { readBy: req.user._id } }
         );
         
         res.json({ message: 'Chat marked as read' });

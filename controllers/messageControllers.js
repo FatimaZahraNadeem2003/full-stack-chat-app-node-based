@@ -36,7 +36,7 @@ const sendMessage = asyncHandler(async(req,res) => {
         sender: req.user._id,
         content: content || '',
         chat: chatId,
-        readBy: [req.user._id] 
+        readBy: [req.user._id] // Sender has read their own message
     };
     
     if (fileUrl) {
@@ -65,11 +65,26 @@ const sendMessage = asyncHandler(async(req,res) => {
 
         const io = req.app.get('io');
         if (io) {
-            chat.users.forEach(user => {
+            // Get unread counts for each user
+            const unreadCounts = {};
+            
+            for (const user of chat.users) {
                 if (user._id.toString() !== req.user._id.toString()) {
-                    io.to(user._id.toString()).emit('message recieved', message);
+                    // Count unread messages for this user in this chat
+                    const unreadCount = await Message.countDocuments({
+                        chat: chatId,
+                        sender: { $ne: user._id },
+                        readBy: { $ne: user._id }
+                    });
+                    unreadCounts[user._id.toString()] = unreadCount;
+                    
+                    // Emit to specific user with unread count
+                    io.to(user._id.toString()).emit('message recieved', {
+                        message: message,
+                        unreadCount: unreadCount
+                    });
                 }
-            });
+            }
         }
 
         res.json(message);
@@ -81,7 +96,6 @@ const sendMessage = asyncHandler(async(req,res) => {
 
 const allMessages = asyncHandler(async (req,res) =>{
     try {
-        const isAdmin = req.user && req.user.isAdmin;
         const chatId = req.params.chatId;
         
         const messages = await Message.find({chat: chatId})
@@ -133,20 +147,33 @@ const clearNotifications = asyncHandler(async (req, res) => {
             { $addToSet: { readBy: req.user._id } }
         );
         
-        res.json({ message: 'All notifications cleared' });
+        // Get updated unread counts
+        const unreadCounts = {};
+        for (const chat of userChats) {
+            const count = await Message.countDocuments({
+                chat: chat._id,
+                sender: { $ne: req.user._id },
+                readBy: { $ne: req.user._id }
+            });
+            unreadCounts[chat._id] = count;
+        }
+        
+        res.json({ 
+            message: 'All notifications cleared',
+            unreadCounts 
+        });
     } catch (error) {
         res.status(400);
         throw new Error(error.message);
     }
 });
 
-
 const markMessagesAsRead = asyncHandler(async (req, res) => {
     try {
         const { chatId } = req.params;
         const userId = req.user._id;
 
-       
+        // Find messages that are not read by this user
         const result = await Message.updateMany(
             { 
                 chat: chatId, 
@@ -156,24 +183,40 @@ const markMessagesAsRead = asyncHandler(async (req, res) => {
             { $addToSet: { readBy: userId } }
         );
 
+        // Get updated unread count for this chat
         const unreadCount = await Message.countDocuments({
             chat: chatId,
             sender: { $ne: userId },
             readBy: { $ne: userId }
         });
 
+        // Get all unread counts for all chats
+        const userChats = await Chat.find({ users: userId }).select('_id');
+        const allUnreadCounts = {};
+        
+        for (const chat of userChats) {
+            const count = await Message.countDocuments({
+                chat: chat._id,
+                sender: { $ne: userId },
+                readBy: { $ne: userId }
+            });
+            allUnreadCounts[chat._id] = count;
+        }
+
         const io = req.app.get('io');
         if (io) {
             io.to(userId.toString()).emit('messages read', { 
                 chatId, 
-                unreadCount 
+                unreadCount,
+                allUnreadCounts
             });
         }
 
         res.json({ 
             success: true, 
             modifiedCount: result.modifiedCount,
-            unreadCount 
+            unreadCount,
+            allUnreadCounts
         });
     } catch (error) {
         res.status(400);
