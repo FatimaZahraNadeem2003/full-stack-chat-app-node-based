@@ -36,7 +36,7 @@ const sendMessage = asyncHandler(async(req,res) => {
         sender: req.user._id,
         content: content || '',
         chat: chatId,
-        readBy: [req.user._id] // Sender has read their own message
+        readBy: [req.user._id] 
     };
     
     if (fileUrl) {
@@ -65,12 +65,10 @@ const sendMessage = asyncHandler(async(req,res) => {
 
         const io = req.app.get('io');
         if (io) {
-            // Get unread counts for each user
             const unreadCounts = {};
             
             for (const user of chat.users) {
                 if (user._id.toString() !== req.user._id.toString()) {
-                    // Count unread messages for this user in this chat
                     const unreadCount = await Message.countDocuments({
                         chat: chatId,
                         sender: { $ne: user._id },
@@ -78,7 +76,6 @@ const sendMessage = asyncHandler(async(req,res) => {
                     });
                     unreadCounts[user._id.toString()] = unreadCount;
                     
-                    // Emit to specific user with unread count
                     io.to(user._id.toString()).emit('message recieved', {
                         message: message,
                         unreadCount: unreadCount
@@ -147,7 +144,6 @@ const clearNotifications = asyncHandler(async (req, res) => {
             { $addToSet: { readBy: req.user._id } }
         );
         
-        // Get updated unread counts
         const unreadCounts = {};
         for (const chat of userChats) {
             const count = await Message.countDocuments({
@@ -173,7 +169,6 @@ const markMessagesAsRead = asyncHandler(async (req, res) => {
         const { chatId } = req.params;
         const userId = req.user._id;
 
-        // Find messages that are not read by this user
         const result = await Message.updateMany(
             { 
                 chat: chatId, 
@@ -183,14 +178,12 @@ const markMessagesAsRead = asyncHandler(async (req, res) => {
             { $addToSet: { readBy: userId } }
         );
 
-        // Get updated unread count for this chat
         const unreadCount = await Message.countDocuments({
             chat: chatId,
             sender: { $ne: userId },
             readBy: { $ne: userId }
         });
 
-        // Get all unread counts for all chats
         const userChats = await Chat.find({ users: userId }).select('_id');
         const allUnreadCounts = {};
         
